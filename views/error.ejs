@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+</head>
+<body>
+    <% if(process.env.NODE_ENV === 'development') { %>
+        <p><%= error.message %></p>
+        <p><%= error.status %></p>
+        <p><%= error.stack %></p>
+    <% } else { %>
+        <p><%= error %></p>
+    <% } %>
+</body>
+</html>
