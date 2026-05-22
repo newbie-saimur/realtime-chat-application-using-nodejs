@@ -1,4 +1,4 @@
-# Universal Backtest Framework — Strategy Guide
+# Universal Backtest Framework v2.0 — Strategy Guide
 
 ## 1. How the Strategy Works
 
@@ -204,10 +204,27 @@ To manually block trading during news:
 
 ---
 
-## 10. File Structure
+## 10. Bar Replay Usage
+
+TradingView's **Bar Replay** feature replays price history bar by bar, letting you see how the strategy would have acted in real time.
+
+**How to use with this script:**
+1. Paste the script in Pine Editor and click **Add to chart**.
+2. In the date range input, choose your period (e.g. "Last 1 Year"). The chart shades bars **outside** the window in gray — the white/colored bars are your backtest window.
+3. Click the **Replay** clock icon in the TradingView toolbar.
+4. Drag the replay cursor to the **start** of your backtest window (beginning of the white/colored zone).
+5. Press **Play** or step forward bar by bar.
+6. The performance table updates live as each trade opens and closes.
+
+**Key replay settings for accuracy:**
+- Keep "Once Per Bar" (not "Once Per Bar Close") unchecked on alerts — the strategy itself fires on bar close internally.
+- Use the same timeframe you ran the backtest on.
+- Do not use `calc_on_every_tick=true` (already disabled in the script).
+
+## 11. File Structure
 
 ```
 tradingview/
-├── strategy_backtest_framework.pine   ← Main Pine Script strategy
+├── strategy_backtest_framework.pine   ← Main Pine Script strategy (v2.0)
 └── STRATEGY_GUIDE.md                  ← This documentation
 ```
