@@ -323,15 +323,23 @@ weekly_dd = (wk_eq0  - strategy.equity) / math.max(wk_eq0,  1.0) * 100
 // ─── STATE — RUNNING PERFORMANCE STATS (O(1) per bar — no end-of-data loops) ─
 // =============================================================================
 
-var int   st_wins  = 0,  st_loss  = 0
-var float st_gpro  = 0.0, st_gloss = 0.0
-var int   st_cw    = 0,  st_cl    = 0      // current consec win/loss streaks
-var int   st_mxcw  = 0,  st_mxcl  = 0     // all-time max streaks
+var int   st_wins  = 0
+var int   st_loss  = 0
+var float st_gpro  = 0.0
+var float st_gloss = 0.0
+var int   st_cw    = 0      // current consec win streak
+var int   st_cl    = 0      // current consec loss streak
+var int   st_mxcw  = 0      // all-time max win streak
+var int   st_mxcl  = 0      // all-time max loss streak
 // Long / Short split
-var int   lg_wins  = 0,  lg_loss  = 0
-var float lg_pro   = 0.0, lg_gl   = 0.0
-var int   sh_wins  = 0,  sh_loss  = 0
-var float sh_pro   = 0.0, sh_gl   = 0.0
+var int   lg_wins  = 0
+var int   lg_loss  = 0
+var float lg_pro   = 0.0
+var float lg_gl    = 0.0
+var int   sh_wins  = 0
+var int   sh_loss  = 0
+var float sh_pro   = 0.0
+var float sh_gl    = 0.0
 // Trade duration
 var int   t_bar_in = na
 var float t_dur    = 0.0
