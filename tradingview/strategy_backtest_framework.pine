@@ -33,7 +33,7 @@ strategy(
      commission_value         = 0.05,   // ← change per asset class (see header)
      slippage                 = 1,      // base tick slippage; Execution Engine adds more
      calc_on_every_tick       = false,
-     fill_orders_on_close     = false   // fills at next bar open — no repainting
+     process_orders_on_close  = false   // fills at next bar open — no repainting
  )
 
 // =============================================================================
@@ -519,8 +519,13 @@ var bool  be_l = false
 var bool  be_s = false
 
 if flat
-    ep := na; sl := na; tp := na; ptp := na; sd0 := na
-    be_l := false; be_s := false
+    ep  := na
+    sl  := na
+    tp  := na
+    ptp := na
+    sd0 := na
+    be_l := false
+    be_s := false
 
 // =============================================================================
 // ─── ENTRIES — WITH EXECUTION ENGINE ─────────────────────────────────────────
