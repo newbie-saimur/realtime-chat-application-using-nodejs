@@ -816,20 +816,27 @@ if i_show_month and barstate.islast
 
 // =============================================================================
 // ─── ALERTS ──────────────────────────────────────────────────────────────────
-// Set "Once Per Bar Close" in TradingView alert dialog for no-repaint delivery.
+// alert() fires once per bar close when the condition is true (no-repaint).
+// In TradingView: Add Alert → Condition → "UBF v3.0: alert() function calls"
 // =============================================================================
 
-alertcondition(long_sig,  "BUY",  "UBF BUY  | {{ticker}} @ {{close}} | TF: {{interval}}")
-alertcondition(short_sig, "SELL", "UBF SELL | {{ticker}} @ {{close}} | TF: {{interval}}")
+if long_sig
+    alert("UBF BUY  | " + syminfo.ticker + " @ " + str.tostring(close) + " | TF: " + timeframe.period, alert.freq_once_per_bar_close)
+if short_sig
+    alert("UBF SELL | " + syminfo.ticker + " @ " + str.tostring(close) + " | TF: " + timeframe.period, alert.freq_once_per_bar_close)
 
 _was_long  = strategy.position_size[1] > 0 and strategy.position_size == 0
 _was_short = strategy.position_size[1] < 0 and strategy.position_size == 0
 _last_pnl  = strategy.closedtrades > 0 ? strategy.closedtrades.profit(strategy.closedtrades - 1) : 0.0
 
-alertcondition(_was_long  and _last_pnl > 0, "Long TP",  "UBF Long TP  | {{ticker}} @ {{close}}")
-alertcondition(_was_long  and _last_pnl < 0, "Long SL",  "UBF Long SL  | {{ticker}} @ {{close}}")
-alertcondition(_was_short and _last_pnl > 0, "Short TP", "UBF Short TP | {{ticker}} @ {{close}}")
-alertcondition(_was_short and _last_pnl < 0, "Short SL", "UBF Short SL | {{ticker}} @ {{close}}")
+if _was_long  and _last_pnl > 0
+    alert("UBF Long TP  | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_long  and _last_pnl < 0
+    alert("UBF Long SL  | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_short and _last_pnl > 0
+    alert("UBF Short TP | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_short and _last_pnl < 0
+    alert("UBF Short SL | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
 
 // =============================================================================
 // ─── NEWS FILTER PLACEHOLDER ─────────────────────────────────────────────────
