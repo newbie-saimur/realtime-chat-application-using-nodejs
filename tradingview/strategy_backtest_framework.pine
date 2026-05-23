@@ -1,0 +1,854 @@
+// =============================================================================
+// UNIVERSAL BACKTEST FRAMEWORK v3.0 — Pine Script v6
+// Institutional-Grade Research Framework
+// Crypto (BTCUSDT · ETHUSDT) | Forex (EURUSD · GBPUSD · USDJPY) | Gold (XAUUSD)
+//
+// NEW IN v3: Walk-Forward Testing | Dynamic Spread Engine | Choppiness Index |
+//   ATR Percentile Filter | Sharpe / Sortino / Calmar | CAGR | Dynamic Risk |
+//   Weekly DD Guard | Daily Trade Limit | Session Presets | Monthly Returns |
+//   Long vs Short Analytics | Quality Score | Anti-Overfitting Warnings
+//
+// ── Commission guide (edit commission_value in strategy() below) ──────────────
+//   Crypto spot/futures : 0.05 % (Binance) | 0.04 % (Bybit maker)
+//   Forex majors        : 0.003 % (≈ 0.3-pip spread proxy)
+//   Gold XAUUSD         : 0.01  % (≈ $0.20 at $2 000/oz)
+//   NOTE: Set commission to match your broker. The Spread Preset adds further
+//         execution cost by shifting SL/TP from the spread-adjusted entry price.
+//
+// ── Slippage guide ───────────────────────────────────────────────────────────
+//   M1 / M5  → 3–5 ticks | M15 / H1 → 2–3 ticks | H4 / D → 1–2 ticks
+//   Additional dynamic slippage is configured in the Execution Engine group.
+// =============================================================================
+//@version=6
+strategy(
+     title                   = "Universal Backtest Framework v3.0",
+     shorttitle               = "UBF v3.0",
+     overlay                  = true,
+     pyramiding               = 0,
+     default_qty_type         = strategy.percent_of_equity,
+     default_qty_value        = 10,
+     initial_capital          = 10000,
+     currency                 = currency.USD,
+     commission_type          = strategy.commission.percent,
+     commission_value         = 0.05,   // ← change per asset class (see header)
+     slippage                 = 1,      // base tick slippage; Execution Engine adds more
+     calc_on_every_tick       = false,
+     process_orders_on_close  = false   // fills at next bar open — no repainting
+ )
+
+// =============================================================================
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+// =============================================================================
+
+// ── Date Range & Walk-Forward ─────────────────────────────────────────────────
+GRP_DATE     = "Date Range & Walk-Forward"
+i_date_mode  = input.string("Last 1 Year", "Backtest Period",
+     options  = ["Last 6 Months","Last 1 Year","Last 2 Years","Last 3 Years","Custom"],
+     tooltip  = "Bar Replay: drag TradingView replay cursor to the start of the colored zone.",
+     group    = GRP_DATE)
+i_cust_start = input.time(timestamp("2023-01-01 00:00"), "Custom Start", group=GRP_DATE)
+i_cust_end   = input.time(timestamp("2099-12-31 23:59"), "Custom End",   group=GRP_DATE)
+i_wf_on      = input.bool(false, "Walk-Forward Mode (OOS only)", group=GRP_DATE,
+     tooltip  = "ON = entries only in Out-Of-Sample zone (right portion).\nIS zone shaded blue, OOS shaded green.\nOptimize parameters visually on IS data, then validate on OOS.")
+i_wf_is_pct  = input.int(70, "In-Sample %", minval=10, maxval=90, group=GRP_DATE,
+     tooltip  = "% of the date window reserved for In-Sample (optimization). Remainder = OOS (validation).")
+
+// ── Execution Engine ──────────────────────────────────────────────────────────
+GRP_EXEC     = "Execution Engine"
+i_spread_pre = input.string("Forex Major", "Spread Preset",
+     options  = ["Forex Major","Forex Minor","XAUUSD","BTCUSDT","ETHUSDT","None","Custom"],
+     tooltip  = "Shifts effective SL/TP to simulate bid-ask spread cost on top of commission.\nForex Major ≈ 1 pip | Minor ≈ 2.5 pips | XAUUSD ≈ $0.20 | BTC ≈ $5 | ETH ≈ $0.30\nFor 5-decimal brokers (EURUSD), 1 pip = 10 ticks = 0.0001.",
+     group    = GRP_EXEC)
+i_cust_sprd  = input.float(0.0,  "Custom Spread (price units)", step=0.0001, group=GRP_EXEC)
+i_sprd_widen = input.bool(true,  "Widen Spread in High Volatility", group=GRP_EXEC,
+     tooltip  = "Scales spread by (ATR / 50-bar ATR avg) when above average. Simulates volatile-market widening.")
+i_rand_slip  = input.bool(false, "Randomized Slippage",   group=GRP_EXEC,
+     tooltip  = "Adds pseudo-random slippage each bar. Deterministic (bar_index seed) — reproducible across runs. Stress-tests execution sensitivity.")
+i_slip_pts   = input.float(3.0,  "Max Slippage (points)", step=0.5, group=GRP_EXEC)
+
+// ── Trend — EMA ───────────────────────────────────────────────────────────────
+GRP_EMA      = "Trend — EMA"
+i_ema_fast   = input.int(20, "EMA Fast", minval=1, group=GRP_EMA)
+i_ema_slow   = input.int(50, "EMA Slow", minval=1, group=GRP_EMA)
+
+// ── Momentum — RSI ────────────────────────────────────────────────────────────
+GRP_RSI      = "Momentum — RSI"
+i_rsi_len    = input.int(14, "RSI Length",    minval=1,           group=GRP_RSI)
+i_rsi_long   = input.int(50, "Long min RSI",  minval=1, maxval=99, group=GRP_RSI)
+i_rsi_short  = input.int(50, "Short max RSI", minval=1, maxval=99, group=GRP_RSI)
+
+// ── Market Regime Detection ───────────────────────────────────────────────────
+GRP_REG      = "Market Regime Detection"
+i_use_adx    = input.bool(true,  "ADX Filter (trending only)",   group=GRP_REG)
+i_adx_thresh = input.int(20,     "ADX Threshold", minval=5,      group=GRP_REG)
+i_use_chop   = input.bool(false, "Choppiness Index Filter",      group=GRP_REG,
+     tooltip  = "CHOP < 61.8 = trending (trades allowed). CHOP > 61.8 = ranging (trades blocked).\nFormula: 100 × log10(ΣATRs / Range) / log10(n). Range 0-100.")
+i_chop_len   = input.int(14,     "Choppiness Length", minval=3,  group=GRP_REG)
+i_use_atrpct = input.bool(false, "ATR Percentile Filter",        group=GRP_REG,
+     tooltip  = "Excludes very low-vol bars (false breakouts) and very high-vol bars (erratic moves). Filters by where current ATR sits in the last 100 bars.")
+i_atr_pct_lo = input.int(20,     "ATR Pct Min", minval=0, maxval=99, group=GRP_REG)
+i_atr_pct_hi = input.int(80,     "ATR Pct Max", minval=1, maxval=100, group=GRP_REG)
+i_trend_only = input.bool(true,  "Trend-Only Mode (EMA slope)",  group=GRP_REG)
+
+// ── Optional Filters ──────────────────────────────────────────────────────────
+GRP_FILT     = "Optional Filters"
+i_use_vwap   = input.bool(false, "VWAP Filter",               group=GRP_FILT)
+i_use_vol    = input.bool(false, "Volume Filter",             group=GRP_FILT)
+i_vol_mult   = input.float(1.5,  "Volume Multiplier", step=0.1, group=GRP_FILT)
+
+// ── Support / Resistance Breakout ─────────────────────────────────────────────
+GRP_SR       = "Support / Resistance Breakout"
+i_sr_bars    = input.int(20, "Lookback Bars", minval=3, maxval=500, group=GRP_SR)
+
+// ── Higher-Timeframe Confirmation ─────────────────────────────────────────────
+GRP_MTF      = "Higher-Timeframe Confirmation"
+i_use_htf    = input.bool(false,     "Enable HTF", group=GRP_MTF)
+i_htf        = input.timeframe("60", "HTF",        group=GRP_MTF)
+
+// ── Stop Loss ─────────────────────────────────────────────────────────────────
+GRP_SL       = "Stop Loss"
+i_sl_mode    = input.string("ATR", "SL Mode", options=["ATR","Fixed","Percent"], group=GRP_SL)
+i_atr_len    = input.int(14,   "ATR Length",        minval=1,   group=GRP_SL)
+i_atr_mult   = input.float(1.5,"ATR Multiplier",    step=0.1,   group=GRP_SL)
+i_fixed_sl   = input.float(50, "Fixed SL (points)", step=0.5,   group=GRP_SL)
+i_pct_sl     = input.float(1.0,"Percent SL (%)",    step=0.1,   group=GRP_SL)
+
+// ── Take Profit & Exits ───────────────────────────────────────────────────────
+GRP_TP       = "Take Profit & Exits"
+i_rr         = input.float(2.0, "Risk/Reward Ratio",     step=0.1, minval=0.1,        group=GRP_TP)
+i_use_trail  = input.bool(false,"Trailing Stop",                                       group=GRP_TP)
+i_trail_pts  = input.float(30,  "Trail Offset (points)", step=0.5,                    group=GRP_TP)
+i_use_be     = input.bool(false,"Break-Even Stop",                                    group=GRP_TP)
+i_be_r       = input.float(1.0, "BE Trigger (R)",        step=0.1,                    group=GRP_TP)
+i_use_part   = input.bool(false,"Partial Take Profit",                                group=GRP_TP)
+i_part_pct   = input.float(50,  "Partial — close %",     step=5, minval=1, maxval=99, group=GRP_TP)
+i_part_r     = input.float(1.0, "Partial TP at (R)",     step=0.1,                    group=GRP_TP)
+
+// ── Position Sizing ───────────────────────────────────────────────────────────
+GRP_SIZE     = "Position Sizing"
+i_size_mode  = input.string("RiskPct","Method", options=["RiskPct","FixedLot"], group=GRP_SIZE)
+i_risk_pct   = input.float(1.0,"Base Risk % per Trade", step=0.1, minval=0.01,  group=GRP_SIZE)
+i_fixed_lot  = input.float(1.0,"Fixed Lot Size",        step=0.001, minval=0.001,group=GRP_SIZE)
+i_leverage   = input.float(1.0,"Leverage",              step=1, minval=1,        group=GRP_SIZE,
+     tooltip  = "Multiplies position size — amplifies both profit and loss proportionally.")
+i_dyn_risk   = input.bool(true, "Dynamic Risk Scaling", group=GRP_SIZE,
+     tooltip  = "Reduces risk after consecutive losses; slow recovery after consecutive wins.\nFloor = 25 % of base risk. Anti-Martingale approach.")
+i_risk_step  = input.float(0.2,"Risk Reduce per Consec Loss (×)", step=0.05, group=GRP_SIZE,
+     tooltip  = "Example: 0.2 → after 2 losses risk = base × 0.6; after 3 = base × 0.4.")
+i_max_risk   = input.float(2.0,"Max Risk % (win-streak cap)", step=0.1, group=GRP_SIZE)
+
+// ── Loss Protection ───────────────────────────────────────────────────────────
+GRP_DD       = "Loss Protection"
+i_max_dd_d   = input.float(5.0, "Max Daily Drawdown (%)",   step=0.5, group=GRP_DD)
+i_max_dd_w   = input.float(10.0,"Max Weekly Drawdown (%)",  step=0.5, group=GRP_DD)
+i_max_consec = input.int(3,     "Max Consecutive Losses",   minval=1, group=GRP_DD)
+i_cooldown   = input.int(5,     "Cooldown Bars After Loss", minval=0, group=GRP_DD)
+i_max_day_t  = input.int(3,     "Max Trades per Day",       minval=1, group=GRP_DD)
+
+// ── Session Presets ───────────────────────────────────────────────────────────
+GRP_SESS     = "Session Filter"
+i_sess_pre   = input.string("Off", "Session Preset",
+     options  = ["Off","London","New York","Asia","London-NY Overlap","Custom"],
+     tooltip  = "London: 08:00–16:00 | NY: 13:00–22:00 | Asia: 00:00–09:00 | Overlap: 13:00–16:00\nAll times in exchange timezone (UTC for most crypto/forex feeds).",
+     group    = GRP_SESS)
+i_cust_sess  = input.session("0800-1700","Custom Session", group=GRP_SESS)
+
+// ── Visualization ─────────────────────────────────────────────────────────────
+GRP_VIS      = "Visualization"
+i_show_perf  = input.bool(true, "Show Performance Dashboard",  group=GRP_VIS)
+i_show_qual  = input.bool(true, "Show Quality Dashboard",      group=GRP_VIS)
+i_show_month = input.bool(true, "Show Monthly Returns",        group=GRP_VIS)
+i_color_bars = input.bool(true, "Color Bars by Trend",         group=GRP_VIS)
+i_show_lvls  = input.bool(true, "Show SL / TP Lines",          group=GRP_VIS)
+
+// =============================================================================
+// ─── DATE RANGE & WALK-FORWARD ZONES ─────────────────────────────────────────
+// =============================================================================
+
+_DAY      = 86400000
+date_from = switch i_date_mode
+    "Last 6 Months" => timenow - 183  * _DAY
+    "Last 1 Year"   => timenow - 365  * _DAY
+    "Last 2 Years"  => timenow - 730  * _DAY
+    "Last 3 Years"  => timenow - 1095 * _DAY
+    "Custom"        => i_cust_start
+    =>                 timenow - 365  * _DAY
+date_to   = i_date_mode == "Custom" ? i_cust_end : timenow
+
+// Walk-forward split: IS = [date_from, wf_split], OOS = (wf_split, date_to]
+wf_split  = date_from + math.round((date_to - date_from) * i_wf_is_pct / 100.0)
+is_zone   = time >= date_from and time <= wf_split
+oos_zone  = time >  wf_split  and time <= date_to
+in_range  = time >= date_from and time <= date_to
+// In WF mode: entries restricted to OOS only (validation zone)
+act_zone  = i_wf_on ? oos_zone : in_range
+
+// =============================================================================
+// ─── INDICATORS ──────────────────────────────────────────────────────────────
+// =============================================================================
+
+ema_fast     = ta.ema(close, i_ema_fast)
+ema_slow     = ta.ema(close, i_ema_slow)
+rsi_val      = ta.rsi(close, i_rsi_len)
+atr_val      = ta.atr(i_atr_len)
+atr_sma50    = ta.sma(atr_val, 50)   // for spread volatility scaling
+vwap_val     = ta.vwap(hlc3)
+vol_sma      = ta.sma(volume, 20)
+[_dip, _dim, adx_val] = ta.dmi(14, 14)
+
+// Choppiness Index: < 38.2 = strong trend | > 61.8 = choppy/ranging (0-100 scale)
+// Formula: 100 × log10(sum of 1-bar ATRs / (highest high − lowest low)) / log10(n)
+_chop_atr1   = math.sum(ta.atr(1), i_chop_len)
+_chop_range  = math.max(ta.highest(high, i_chop_len) - ta.lowest(low, i_chop_len), syminfo.mintick)
+chop_val     = 100.0 * math.log10(math.max(_chop_atr1, 1e-10) / _chop_range) / math.log10(i_chop_len)
+
+// ATR percentile rank: where current ATR sits within the last 100 bars (0-100)
+atr_pct_rank = ta.percentrank(atr_val, 100)
+
+// S/R: [1] offset excludes current bar from the rolling window — prevents repainting
+res = ta.highest(high, i_sr_bars)[1]
+sup = ta.lowest(low,  i_sr_bars)[1]
+
+// HTF: lookahead_off reads only the confirmed (closed) HTF bar — no future data leak
+htf_fast = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_ema_fast), lookahead=barmerge.lookahead_off)
+htf_slow = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_ema_slow), lookahead=barmerge.lookahead_off)
+
+// =============================================================================
+// ─── HELPER FUNCTIONS ────────────────────────────────────────────────────────
+// =============================================================================
+
+// Table cell — accepts a table object (valid in Pine Script v5 since tables are reference types)
+f_tcell(tbl, c, r, txt, bg, sz) =>
+    table.cell(tbl, c, r, txt, text_color=color.white, bgcolor=bg, text_size=sz)
+
+// Spread simulation: returns price-unit cost added to effective entry price
+// Uses mintick multiplication so pip-based values auto-scale to symbol precision
+// e.g. EURUSD (mintick=0.00001): 10 ticks = 0.0001 = 1 pip ✓
+//      USDJPY (mintick=0.001):   10 ticks = 0.01   = 1 pip ✓
+f_spread() =>
+    base = switch i_spread_pre
+        "Forex Major" => 10.0 * syminfo.mintick   // 1 pip
+        "Forex Minor" => 25.0 * syminfo.mintick   // 2.5 pips
+        "XAUUSD"      => 0.20                     // $0.20 absolute
+        "BTCUSDT"     => 5.0                      // $5 absolute
+        "ETHUSDT"     => 0.30                     // $0.30 absolute
+        "None"        => 0.0
+        "Custom"      => i_cust_sprd
+        => 0.0
+    // Scale spread by ATR ratio when volatility is elevated
+    vol_s = i_sprd_widen and atr_sma50 > 1e-10 ? math.max(1.0, atr_val / atr_sma50) : 1.0
+    base * vol_s
+
+// Slippage per side (deterministic pseudo-random using bar_index as seed)
+// Deterministic = same sequence every backtest run → reproducible results
+f_slip() =>
+    base = i_slip_pts * syminfo.mintick
+    i_rand_slip ? math.random(bar_index % 999983) * base : base * 0.5
+
+// SL distance in price units
+f_sl_dist() =>
+    switch i_sl_mode
+        "ATR"     => atr_val * i_atr_mult
+        "Fixed"   => i_fixed_sl * syminfo.mintick
+        "Percent" => close * i_pct_sl / 100
+        =>           atr_val * i_atr_mult
+
+// Dynamic risk multiplier: reduces after losses, slowly recovers after wins
+// Anti-Martingale: bet smaller when losing, never chase losses
+f_risk_mult(cl, cw) =>
+    if not i_dyn_risk
+        1.0
+    else if cl > 0
+        math.max(0.25, 1.0 - cl * i_risk_step)                            // loss streak → reduce, floor 25%
+    else
+        math.min(i_max_risk / math.max(i_risk_pct, 0.01), 1.0 + cw * 0.1) // win streak → slow recovery
+
+// Position size in contracts
+f_qty(sd, rm) =>
+    pv = math.max(syminfo.pointvalue, 1e-10)   // guard: pointvalue may be 0 on some feeds
+    switch i_size_mode
+        "RiskPct"  => strategy.equity * (i_risk_pct * rm / 100) * i_leverage / math.max(sd * pv, 1e-10)
+        "FixedLot" => i_fixed_lot
+        =>            i_fixed_lot
+
+// Session gate (inline switch avoids empty-string edge case in time())
+f_in_sess() =>
+    switch i_sess_pre
+        "Off"               => true
+        "London"            => not na(time(timeframe.period, "0800-1600"))
+        "New York"          => not na(time(timeframe.period, "1300-2200"))
+        "Asia"              => not na(time(timeframe.period, "0000-0900"))
+        "London-NY Overlap" => not na(time(timeframe.period, "1300-1600"))
+        "Custom"            => not na(time(timeframe.period, i_cust_sess))
+        => true
+
+// Bars per year (for annualizing Sharpe / Sortino / Calmar)
+f_bpy() =>
+    if timeframe.isintraday
+        math.round(252.0 * 1440 / timeframe.multiplier)
+    else if timeframe.isdaily
+        252
+    else if timeframe.isweekly
+        52
+    else
+        12
+
+// =============================================================================
+// ─── STATE — LOSS PROTECTION ─────────────────────────────────────────────────
+// =============================================================================
+
+var int   consec_loss = 0
+var int   consec_win  = 0
+var int   cooldown_b  = 0
+var int   trades_tod  = 0
+var float day_eq0     = strategy.equity
+var float wk_eq0      = strategy.equity
+
+is_new_day  = ta.change(dayofweek)  != 0
+is_new_week = ta.change(weekofyear) != 0
+
+if is_new_day
+    day_eq0    := strategy.equity
+    trades_tod := 0
+if is_new_week
+    wk_eq0 := strategy.equity
+
+if cooldown_b > 0
+    cooldown_b -= 1
+
+daily_dd  = (day_eq0 - strategy.equity) / math.max(day_eq0, 1.0) * 100
+weekly_dd = (wk_eq0  - strategy.equity) / math.max(wk_eq0,  1.0) * 100
+
+// =============================================================================
+// ─── STATE — RUNNING PERFORMANCE STATS (O(1) per bar — no end-of-data loops) ─
+// =============================================================================
+
+var int   st_wins  = 0
+var int   st_loss  = 0
+var float st_gpro  = 0.0
+var float st_gloss = 0.0
+var int   st_cw    = 0      // current consec win streak
+var int   st_cl    = 0      // current consec loss streak
+var int   st_mxcw  = 0      // all-time max win streak
+var int   st_mxcl  = 0      // all-time max loss streak
+// Long / Short split
+var int   lg_wins  = 0
+var int   lg_loss  = 0
+var float lg_pro   = 0.0
+var float lg_gl    = 0.0
+var int   sh_wins  = 0
+var int   sh_loss  = 0
+var float sh_pro   = 0.0
+var float sh_gl    = 0.0
+// Trade duration
+var int   t_bar_in = na
+var float t_dur    = 0.0
+
+// =============================================================================
+// ─── STATE — WELFORD ONLINE VARIANCE (Sharpe / Sortino — no arrays needed) ──
+// Welford's algorithm: computes running mean and variance in a single pass, O(1)
+// =============================================================================
+
+var int   wf_n     = 0
+var float wf_mean  = 0.0
+var float wf_M2    = 0.0    // sum of squared deviations from running mean
+var float wf_negss = 0.0    // sum of (negative return)² — for Sortino downside σ
+var int   wf_negn  = 0
+
+eq_ret = strategy.equity > 0 and strategy.equity[1] > 0 ?
+     (strategy.equity - strategy.equity[1]) / strategy.equity[1] : 0.0
+
+if not na(eq_ret)
+    wf_n    += 1
+    _d       = eq_ret - wf_mean
+    wf_mean += _d / wf_n
+    wf_M2   += _d * (eq_ret - wf_mean)   // note: wf_mean is already updated above
+    if eq_ret < 0.0
+        wf_negss += eq_ret * eq_ret
+        wf_negn  += 1
+
+// =============================================================================
+// ─── STATE — MONTHLY RETURNS (rolling array, max ~60 elements over 5 years) ──
+// =============================================================================
+
+var int   cur_m   = month
+var int   cur_y   = year
+var float m_eq0   = strategy.initial_capital
+var float[] m_ret = array.new<float>(0)
+var int[]   m_mon = array.new<int>(0)
+var int[]   m_yr  = array.new<int>(0)
+
+is_new_month = month != month[1] or year != year[1]
+if is_new_month and bar_index > 0
+    array.push(m_ret, (strategy.equity - m_eq0) / math.max(m_eq0, 1.0) * 100)
+    array.push(m_mon, cur_m)
+    array.push(m_yr,  cur_y)
+    m_eq0  := strategy.equity
+    cur_m  := month
+    cur_y  := year
+
+// =============================================================================
+// ─── UPDATE STATS ON EACH CLOSED TRADE ───────────────────────────────────────
+// =============================================================================
+
+new_close = strategy.closedtrades > strategy.closedtrades[1]
+if new_close
+    idx      = strategy.closedtrades - 1
+    tpnl     = strategy.closedtrades.profit(idx)
+    was_long = strategy.closedtrades.size(idx) > 0
+
+    if not na(t_bar_in)
+        t_dur    += bar_index - t_bar_in
+        t_bar_in := na
+
+    if tpnl > 0
+        st_wins += 1
+        st_gpro += tpnl
+        st_cw   += 1
+        st_cl    := 0
+        st_mxcw  := math.max(st_mxcw, st_cw)
+        consec_loss := 0
+        consec_win  += 1
+        cooldown_b   := 0
+        if was_long
+            lg_wins += 1
+            lg_pro  += tpnl
+        else
+            sh_wins += 1
+            sh_pro  += tpnl
+    else
+        st_loss  += 1
+        st_gloss += math.abs(tpnl)
+        st_cl    += 1
+        st_cw     := 0
+        st_mxcl   := math.max(st_mxcl, st_cl)
+        consec_loss := st_cl
+        consec_win   := 0
+        cooldown_b   := i_cooldown
+        if was_long
+            lg_loss += 1
+            lg_gl   += math.abs(tpnl)
+        else
+            sh_loss += 1
+            sh_gl   += math.abs(tpnl)
+
+// =============================================================================
+// ─── COMPUTED METRICS ────────────────────────────────────────────────────────
+// =============================================================================
+
+total_t    = st_wins + st_loss
+win_rate   = total_t  > 0 ? st_wins  / total_t * 100 : 0.0
+pf         = st_gloss > 0 ? st_gpro  / st_gloss      : 0.0
+avg_win    = st_wins  > 0 ? st_gpro  / st_wins        : 0.0
+avg_loss   = st_loss  > 0 ? st_gloss / st_loss        : 0.0
+expectancy = total_t  > 0 ? win_rate / 100 * avg_win - (1.0 - win_rate / 100) * avg_loss : 0.0
+rr_actual  = avg_loss > 0 ? avg_win  / avg_loss       : 0.0
+rec_factor = strategy.max_drawdown > 0 ? strategy.netprofit / strategy.max_drawdown : 0.0
+avg_dur    = total_t  > 0 ? t_dur / total_t           : 0.0
+lg_wr      = (lg_wins + lg_loss) > 0 ? lg_wins / (lg_wins + lg_loss) * 100 : 0.0
+sh_wr      = (sh_wins + sh_loss) > 0 ? sh_wins / (sh_wins + sh_loss) * 100 : 0.0
+
+// CAGR: compound annual growth rate using bar-level compounding
+bpy    = float(f_bpy())  // cast int→float for math.pow / math.sqrt
+cagr   = wf_n > 50 and strategy.initial_capital > 0 ?
+     (math.pow(math.max(strategy.equity / strategy.initial_capital, 1e-6), bpy / wf_n) - 1.0) * 100 : 0.0
+
+// Sharpe Ratio: annualized mean / annualized std of bar-level returns
+wf_var = wf_n > 1 ? wf_M2 / (wf_n - 1) : 0.0
+wf_std = math.sqrt(wf_var)
+sharpe = wf_std > 1e-10 ? wf_mean / wf_std * math.sqrt(bpy) : 0.0
+
+// Sortino Ratio: mean return / downside deviation (only negative-return bars)
+so_ds   = wf_negn > 1 ? math.sqrt(wf_negss / wf_negn) : 0.0
+sortino = so_ds > 1e-10 ? wf_mean * math.sqrt(bpy) / so_ds : 0.0
+
+// Calmar Ratio: CAGR / Max Drawdown %  (> 1.0 is good, > 3.0 is excellent)
+max_dd_pct = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : 0.0
+calmar     = max_dd_pct > 0 ? cagr / max_dd_pct : 0.0
+
+// =============================================================================
+// ─── TRADE GATE ──────────────────────────────────────────────────────────────
+// =============================================================================
+
+risk_mult  = f_risk_mult(consec_loss, consec_win)
+
+trade_gate = daily_dd    < i_max_dd_d and
+             weekly_dd   < i_max_dd_w and
+             cooldown_b  == 0 and
+             consec_loss < i_max_consec and
+             trades_tod  < i_max_day_t
+
+// =============================================================================
+// ─── MARKET REGIME DETECTION ─────────────────────────────────────────────────
+// =============================================================================
+
+regime_adx  = not i_use_adx   or adx_val > i_adx_thresh
+// 61.8 = standard Choppiness threshold (Fibonacci-derived)
+regime_chop = not i_use_chop  or chop_val < 61.8
+regime_atr  = not i_use_atrpct or (atr_pct_rank >= i_atr_pct_lo and atr_pct_rank <= i_atr_pct_hi)
+regime_ok   = regime_adx and regime_chop and regime_atr
+
+// =============================================================================
+// ─── SIGNAL CONDITIONS ───────────────────────────────────────────────────────
+// =============================================================================
+
+bull       = ema_fast > ema_slow
+bear       = ema_fast < ema_slow
+slope_bull = ema_slow > ema_slow[5]
+slope_bear = ema_slow < ema_slow[5]
+rsi_bull   = rsi_val > i_rsi_long
+rsi_bear   = rsi_val < i_rsi_short
+vwap_l     = not i_use_vwap or close > vwap_val
+vwap_s     = not i_use_vwap or close < vwap_val
+vol_ok     = not i_use_vol  or volume > vol_sma * i_vol_mult
+htf_l      = not i_use_htf  or htf_fast > htf_slow
+htf_s      = not i_use_htf  or htf_fast < htf_slow
+trend_l    = not i_trend_only or slope_bull
+trend_s    = not i_trend_only or slope_bear
+// S/R breakout: close beyond confirmed previous swing level
+bo_long    = close > res
+bo_short   = close < sup
+flat       = strategy.position_size == 0
+
+long_sig   = bull and rsi_bull  and bo_long  and vwap_l and vol_ok and
+             htf_l and trend_l and regime_ok and f_in_sess() and
+             act_zone and trade_gate and flat
+
+short_sig  = bear and rsi_bear  and bo_short and vwap_s and vol_ok and
+             htf_s and trend_s and regime_ok and f_in_sess() and
+             act_zone and trade_gate and flat
+
+// =============================================================================
+// ─── TRADE STATE ─────────────────────────────────────────────────────────────
+// =============================================================================
+
+var float ep   = na   // effective entry price (spread + slippage adjusted)
+var float sl   = na   // active stop-loss price
+var float tp   = na   // full take-profit price
+var float ptp  = na   // partial take-profit price
+var float sd0  = na   // initial SL distance (for break-even trigger)
+var bool  be_l = false
+var bool  be_s = false
+
+if flat
+    ep  := na
+    sl  := na
+    tp  := na
+    ptp := na
+    sd0 := na
+    be_l := false
+    be_s := false
+
+// =============================================================================
+// ─── ENTRIES — WITH EXECUTION ENGINE ─────────────────────────────────────────
+// Spread + slippage shift the effective entry price, making SL/TP levels
+// more pessimistic (realistic). The actual strategy fill is at bar open; the
+// execution cost is reflected in where we set SL and TP trigger prices.
+// =============================================================================
+
+if long_sig
+    _sp  = f_spread()
+    _sl2 = f_slip()
+    _sd  = f_sl_dist()
+    _rm  = risk_mult
+    ep  := close + _sp + _sl2   // we pay the ask: mid + spread + slippage
+    sl  := ep - _sd
+    tp  := ep + _sd * i_rr
+    ptp := ep + _sd * i_part_r
+    sd0 := _sd
+    strategy.entry("Long", strategy.long, qty=f_qty(_sd, _rm))
+    if i_use_part
+        strategy.exit("Long.P",    "Long", qty_percent=i_part_pct, limit=ptp, stop=sl)
+        strategy.exit("Long.Full", "Long", qty_percent=100,        limit=tp,  stop=sl)
+    else if i_use_trail
+        strategy.exit("Long.T", "Long", trail_price=ep, trail_offset=i_trail_pts * syminfo.mintick, stop=sl)
+    else
+        strategy.exit("Long.X", "Long", limit=tp, stop=sl)
+    t_bar_in   := bar_index
+    trades_tod += 1
+
+if short_sig
+    _sp  = f_spread()
+    _sl2 = f_slip()
+    _sd  = f_sl_dist()
+    _rm  = risk_mult
+    ep  := close - _sp - _sl2   // we receive the bid: mid - spread - slippage
+    sl  := ep + _sd
+    tp  := ep - _sd * i_rr
+    ptp := ep - _sd * i_part_r
+    sd0 := _sd
+    strategy.entry("Short", strategy.short, qty=f_qty(_sd, _rm))
+    if i_use_part
+        strategy.exit("Short.P",    "Short", qty_percent=i_part_pct, limit=ptp, stop=sl)
+        strategy.exit("Short.Full", "Short", qty_percent=100,        limit=tp,  stop=sl)
+    else if i_use_trail
+        strategy.exit("Short.T", "Short", trail_price=ep, trail_offset=i_trail_pts * syminfo.mintick, stop=sl)
+    else
+        strategy.exit("Short.X", "Short", limit=tp, stop=sl)
+    t_bar_in   := bar_index
+    trades_tod += 1
+
+// =============================================================================
+// ─── BREAK-EVEN STOP ─────────────────────────────────────────────────────────
+// Re-calling strategy.exit() with the same ID updates the existing order.
+// be_l / be_s flags ensure this fires exactly once per trade.
+// =============================================================================
+
+if i_use_be and not na(ep) and not na(sd0)
+    if strategy.position_size > 0 and not be_l
+        if high >= ep + sd0 * i_be_r
+            be_l := true
+            sl   := ep
+            if i_use_part
+                strategy.exit("Long.P",    "Long", qty_percent=i_part_pct, limit=ptp, stop=sl)
+                strategy.exit("Long.Full", "Long", qty_percent=100,        limit=tp,  stop=sl)
+            else
+                strategy.exit("Long.X", "Long", limit=tp, stop=sl)
+    else if strategy.position_size < 0 and not be_s
+        if low <= ep - sd0 * i_be_r
+            be_s := true
+            sl   := ep
+            if i_use_part
+                strategy.exit("Short.P",    "Short", qty_percent=i_part_pct, limit=ptp, stop=sl)
+                strategy.exit("Short.Full", "Short", qty_percent=100,        limit=tp,  stop=sl)
+            else
+                strategy.exit("Short.X", "Short", limit=tp, stop=sl)
+
+// =============================================================================
+// ─── VISUALIZATION ───────────────────────────────────────────────────────────
+// =============================================================================
+
+plot(ema_fast,                   "EMA Fast",   color=color.new(color.blue,   0), linewidth=2)
+plot(ema_slow,                   "EMA Slow",   color=color.new(color.orange, 0), linewidth=2)
+plot(i_use_vwap ? vwap_val : na, "VWAP",      color=color.new(color.purple, 40), linewidth=1)
+plot(res, "Resistance", color=color.new(color.red,  60), style=plot.style_stepline, linewidth=1)
+plot(sup, "Support",    color=color.new(color.lime, 60), style=plot.style_stepline, linewidth=1)
+
+plot(i_show_lvls and not na(sl)  ? sl  : na, "SL",         color=color.new(color.red,   0), style=plot.style_linebr, linewidth=1)
+plot(i_show_lvls and not na(tp)  ? tp  : na, "TP",         color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+plot(i_show_lvls and not na(ep)  ? ep  : na, "Entry",      color=color.new(color.white, 0), style=plot.style_linebr, linewidth=1)
+plot(i_show_lvls and i_use_part and not na(ptp) ? ptp : na, "Partial TP",
+     color=color.new(color.teal, 0), style=plot.style_linebr, linewidth=1)
+
+barcolor(i_color_bars ? (bull ? color.new(color.teal, 70) : color.new(color.maroon, 70)) : na)
+
+// Walk-forward zone shading: blue = IS (optimize here), green = OOS (validate here)
+bgcolor(i_wf_on and is_zone  ? color.new(color.blue,  92) : na, title="IS Zone")
+bgcolor(i_wf_on and oos_zone ? color.new(color.green, 92) : na, title="OOS Zone")
+bgcolor(not in_range          ? color.new(color.gray,  90) : na, title="Out of Range")
+
+plotshape(long_sig,  "Long",  shape.triangleup,   location.belowbar, color.lime, size=size.small, text="L")
+plotshape(short_sig, "Short", shape.triangledown, location.abovebar, color.red,  size=size.small, text="S")
+
+// Active trade label — barstate.isconfirmed prevents live-bar label repainting
+if not na(ep) and barstate.isconfirmed
+    _dir = strategy.position_size > 0 ? "▲ LONG" : "▼ SHORT"
+    _up  = strategy.openprofit
+    label.new(bar_index, high, _dir + "  PnL: $" + str.tostring(math.round(_up, 2)),
+         color=_up >= 0 ? color.new(color.green, 20) : color.new(color.red, 20),
+         textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
+// =============================================================================
+// ─── BACKTEST QUALITY SCORE & ANTI-OVERFITTING WARNINGS ─────────────────────
+// Score components: trade count (25), Sharpe (25), PF plausibility (25), period (25)
+// Penalizes suspiciously high PF (>4) and unrealistically low drawdown.
+// =============================================================================
+
+q_trades = math.min(25.0, float(total_t) / 4.0)                     // 25 pts at 100+ trades
+q_sharpe = math.min(25.0, math.max(0.0, sharpe * 10.0))             // 25 pts at Sharpe 2.5
+q_pf     = pf > 1.0 and pf <= 4.0 ?
+     math.min(25.0, (pf - 1.0) * 12.5) : pf > 4.0 ? math.max(0.0, 25.0 - (pf - 4.0) * 5.0) : 0.0
+q_period = math.min(25.0, float(date_to - date_from) / float(_DAY) / 365.0 * 25.0)
+quality  = q_trades + q_sharpe + q_pf + q_period
+q_label  = quality >= 75 ? "HIGH" : quality >= 50 ? "MEDIUM" : quality >= 25 ? "LOW" : "VERY LOW"
+
+// Execution realism score (0-100): rewards spread sim, randomized slip, walk-forward
+exec_sc  = i_spread_pre != "None" ? 70 : 30
+exec_sc += i_rand_slip ? 15 : 5
+exec_sc := math.min(100, exec_sc + (i_wf_on ? 15 : 0))
+exec_lbl = exec_sc >= 85 ? "REALISTIC" : exec_sc >= 60 ? "MODERATE" : "OPTIMISTIC"
+
+// Anti-overfitting warning flags
+warn_trades = total_t > 0 and total_t < 30          // < 30 trades = statistically unreliable
+warn_pf_hi  = pf > 5.0 and total_t > 0              // PF > 5 is almost always curve-fitted
+warn_dd_lo  = strategy.max_drawdown > 0 and strategy.max_drawdown < strategy.netprofit * 0.03 and total_t > 10
+warn_shrp   = sharpe > 4.0 and total_t > 0          // Sharpe > 4 is unrealistic in live markets
+warn_nosprd = i_spread_pre == "None"
+warn_fewbar = bar_index < 300
+
+// =============================================================================
+// ─── DASHBOARD TABLES ────────────────────────────────────────────────────────
+// All tables declared at global scope (valid for var); drawn only on last bar.
+// =============================================================================
+
+var table t_perf  = table.new(position.top_right,   2, 19, border_width=1, border_color=color.new(color.gray, 55), bgcolor=color.new(color.black, 15))
+var table t_qual  = table.new(position.bottom_right, 2, 13, border_width=1, border_color=color.new(color.gray, 55), bgcolor=color.new(color.black, 15))
+var table t_month = table.new(position.bottom_left,  3, 14, border_width=1, border_color=color.new(color.gray, 55), bgcolor=color.new(color.black, 15))
+
+// Shared color palette
+_H   = color.new(color.navy,  0)
+_LBL = color.new(color.black, 45)
+_G   = color.new(color.green, 25)
+_R   = color.new(color.red,   25)
+_N   = color.new(color.gray,  30)
+
+// ── Performance Dashboard (top-right) ─────────────────────────────────────────
+if i_show_perf and barstate.islast
+    f_tcell(t_perf, 0, 0,  "METRIC",             _H,   size.small)
+    f_tcell(t_perf, 1, 0,  "VALUE",              _H,   size.small)
+    f_tcell(t_perf, 0, 1,  "Period",             _LBL, size.small)
+    f_tcell(t_perf, 1, 1,  i_date_mode + (i_wf_on ? " [OOS]" : ""), _N, size.small)
+    f_tcell(t_perf, 0, 2,  "Total Trades",       _LBL, size.small)
+    f_tcell(t_perf, 1, 2,  str.tostring(total_t),_N,   size.small)
+    f_tcell(t_perf, 0, 3,  "Win Rate",           _LBL, size.small)
+    f_tcell(t_perf, 1, 3,  str.tostring(math.round(win_rate, 1)) + "%",
+         win_rate >= 50 ? _G : _R, size.small)
+    f_tcell(t_perf, 0, 4,  "Profit Factor",      _LBL, size.small)
+    f_tcell(t_perf, 1, 4,  str.tostring(math.round(pf, 2)),
+         pf >= 1.5 ? _G : pf >= 1.0 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 5,  "Net Profit",         _LBL, size.small)
+    f_tcell(t_perf, 1, 5,  "$" + str.tostring(math.round(strategy.netprofit, 2)),
+         strategy.netprofit >= 0 ? _G : _R, size.small)
+    f_tcell(t_perf, 0, 6,  "CAGR (approx)",      _LBL, size.small)
+    f_tcell(t_perf, 1, 6,  str.tostring(math.round(cagr, 1)) + "%",
+         cagr >= 20 ? _G : cagr >= 0 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 7,  "Max Drawdown",       _LBL, size.small)
+    f_tcell(t_perf, 1, 7,  "$" + str.tostring(math.round(strategy.max_drawdown, 2)), _R, size.small)
+    f_tcell(t_perf, 0, 8,  "Max DD %",           _LBL, size.small)
+    f_tcell(t_perf, 1, 8,  str.tostring(math.round(max_dd_pct, 2)) + "%",
+         max_dd_pct < 10 ? _G : max_dd_pct < 25 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 9,  "Sharpe Ratio",       _LBL, size.small)
+    f_tcell(t_perf, 1, 9,  str.tostring(math.round(sharpe, 2)),
+         sharpe >= 1.5 ? _G : sharpe >= 0.5 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 10, "Sortino Ratio",      _LBL, size.small)
+    f_tcell(t_perf, 1, 10, str.tostring(math.round(sortino, 2)),
+         sortino >= 2.0 ? _G : sortino >= 1.0 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 11, "Calmar Ratio",       _LBL, size.small)
+    f_tcell(t_perf, 1, 11, str.tostring(math.round(calmar, 2)),
+         calmar >= 1.0 ? _G : calmar >= 0.5 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 12, "Recovery Factor",    _LBL, size.small)
+    f_tcell(t_perf, 1, 12, str.tostring(math.round(rec_factor, 2)),
+         rec_factor >= 2 ? _G : rec_factor >= 1 ? _N : _R, size.small)
+    f_tcell(t_perf, 0, 13, "Expectancy",         _LBL, size.small)
+    f_tcell(t_perf, 1, 13, "$" + str.tostring(math.round(expectancy, 2)),
+         expectancy >= 0 ? _G : _R, size.small)
+    f_tcell(t_perf, 0, 14, "Avg Win / Loss",     _LBL, size.small)
+    f_tcell(t_perf, 1, 14,
+         "$" + str.tostring(math.round(avg_win, 2)) + " / $" + str.tostring(math.round(avg_loss, 2)),
+         _N, size.small)
+    f_tcell(t_perf, 0, 15, "Avg RR (actual)",    _LBL, size.small)
+    f_tcell(t_perf, 1, 15, str.tostring(math.round(rr_actual, 2)),
+         rr_actual >= i_rr ? _G : _N, size.small)
+    f_tcell(t_perf, 0, 16, "Avg Duration",       _LBL, size.small)
+    f_tcell(t_perf, 1, 16, str.tostring(math.round(avg_dur, 1)) + " bars", _N, size.small)
+    f_tcell(t_perf, 0, 17, "Long W / L",         _LBL, size.small)
+    f_tcell(t_perf, 1, 17,
+         str.tostring(lg_wins) + "/" + str.tostring(lg_loss) +
+         "  (" + str.tostring(math.round(lg_wr, 1)) + "% WR)",
+         lg_wr >= 50 ? _G : _N, size.small)
+    f_tcell(t_perf, 0, 18, "Short W / L",        _LBL, size.small)
+    f_tcell(t_perf, 1, 18,
+         str.tostring(sh_wins) + "/" + str.tostring(sh_loss) +
+         "  (" + str.tostring(math.round(sh_wr, 1)) + "% WR)",
+         sh_wr >= 50 ? _G : _N, size.small)
+
+// ── Quality / Robustness Dashboard (bottom-right) ─────────────────────────────
+if i_show_qual and barstate.islast
+    f_tcell(t_qual, 0, 0,  "QUALITY CHECK",    _H,   size.tiny)
+    f_tcell(t_qual, 1, 0,  "STATUS",           _H,   size.tiny)
+    f_tcell(t_qual, 0, 1,  "Quality Score",    _LBL, size.tiny)
+    f_tcell(t_qual, 1, 1,
+         str.tostring(math.round(quality, 0)) + "/100 — " + q_label,
+         quality >= 75 ? _G : quality >= 50 ? _N : _R, size.tiny)
+    f_tcell(t_qual, 0, 2,  "Execution Realism",_LBL, size.tiny)
+    f_tcell(t_qual, 1, 2,
+         exec_lbl + " (" + str.tostring(exec_sc) + "/100)",
+         exec_sc >= 85 ? _G : exec_sc >= 60 ? _N : _R, size.tiny)
+    f_tcell(t_qual, 0, 3,  "Walk-Forward",     _LBL, size.tiny)
+    f_tcell(t_qual, 1, 3,  i_wf_on ? "ON — OOS only ✓" : "OFF", i_wf_on ? _G : _N, size.tiny)
+    f_tcell(t_qual, 0, 4,  "Trade Count",      _LBL, size.tiny)
+    f_tcell(t_qual, 1, 4,
+         str.tostring(total_t) + (warn_trades ? " ⚠ < 30 LOW" : " ✓"),
+         warn_trades ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 5,  "Profit Factor",    _LBL, size.tiny)
+    f_tcell(t_qual, 1, 5,
+         str.tostring(math.round(pf, 2)) + (warn_pf_hi ? " ⚠ > 5 SUSPECT" : " ✓"),
+         warn_pf_hi ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 6,  "Drawdown Check",   _LBL, size.tiny)
+    f_tcell(t_qual, 1, 6,  warn_dd_lo ? "⚠ TOO SMALL (suspect)" : "✓ NORMAL", warn_dd_lo ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 7,  "Sharpe Check",     _LBL, size.tiny)
+    f_tcell(t_qual, 1, 7,
+         warn_shrp ? "⚠ > 4 SUSPECT" : "✓ " + str.tostring(math.round(sharpe, 2)),
+         warn_shrp ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 8,  "Spread Sim",       _LBL, size.tiny)
+    f_tcell(t_qual, 1, 8,
+         warn_nosprd ? "⚠ NONE — OPTIMISTIC" : "✓ " + i_spread_pre,
+         warn_nosprd ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 9,  "Data Bars",        _LBL, size.tiny)
+    f_tcell(t_qual, 1, 9,
+         str.tostring(bar_index) + (warn_fewbar ? " ⚠ FEW" : " ✓"),
+         warn_fewbar ? _R : _G, size.tiny)
+    f_tcell(t_qual, 0, 10, "Regime Filters",   _LBL, size.tiny)
+    f_tcell(t_qual, 1, 10,
+         (i_use_adx   ? "ADX " : "") + (i_use_chop ? "CHOP " : "") + (i_use_atrpct ? "ATR% " : "") +
+         (not i_use_adx and not i_use_chop and not i_use_atrpct ? "none" : ""),
+         _N, size.tiny)
+    f_tcell(t_qual, 0, 11, "Dyn. Risk Mult",   _LBL, size.tiny)
+    f_tcell(t_qual, 1, 11,
+         str.tostring(math.round(risk_mult, 2)) + "× (consec loss: " + str.tostring(consec_loss) + ")",
+         risk_mult < 0.5 ? _R : risk_mult < 1.0 ? _N : _G, size.tiny)
+    f_tcell(t_qual, 0, 12, "Daily DD Used",    _LBL, size.tiny)
+    f_tcell(t_qual, 1, 12,
+         str.tostring(math.round(daily_dd, 2)) + "% / " + str.tostring(i_max_dd_d) + "% limit",
+         daily_dd >= i_max_dd_d ? _R : _N, size.tiny)
+
+// ── Monthly Returns Table (bottom-left) ───────────────────────────────────────
+if i_show_month and barstate.islast
+    f_tcell(t_month, 0, 0, "MON",   _H, size.tiny)
+    f_tcell(t_month, 1, 0, "YEAR",  _H, size.tiny)
+    f_tcell(t_month, 2, 0, "RET %", _H, size.tiny)
+    string[] _mnames = array.from("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    int _mc = array.size(m_ret)
+    int _si = math.max(0, _mc - 12)    // show last 12 months
+    for i = _si to _mc - 1
+        float  _r   = array.get(m_ret, i)
+        int    _m   = array.get(m_mon, i)
+        int    _y   = array.get(m_yr,  i)
+        string _mn  = _m >= 1 and _m <= 12 ? array.get(_mnames, _m) : str.tostring(_m)
+        int    _row = i - _si + 1
+        f_tcell(t_month, 0, _row, _mn,                                   _LBL, size.tiny)
+        f_tcell(t_month, 1, _row, str.tostring(_y),                      _LBL, size.tiny)
+        f_tcell(t_month, 2, _row, str.tostring(math.round(_r, 2)) + "%",
+             _r >= 0 ? color.new(color.green, 30) : color.new(color.red, 30), size.tiny)
+
+// =============================================================================
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+// alert() fires once per bar close when the condition is true (no-repaint).
+// In TradingView: Add Alert → Condition → "UBF v3.0: alert() function calls"
+// =============================================================================
+
+if long_sig
+    alert("UBF BUY  | " + syminfo.ticker + " @ " + str.tostring(close) + " | TF: " + timeframe.period, alert.freq_once_per_bar_close)
+if short_sig
+    alert("UBF SELL | " + syminfo.ticker + " @ " + str.tostring(close) + " | TF: " + timeframe.period, alert.freq_once_per_bar_close)
+
+_was_long  = strategy.position_size[1] > 0 and strategy.position_size == 0
+_was_short = strategy.position_size[1] < 0 and strategy.position_size == 0
+_last_pnl  = strategy.closedtrades > 0 ? strategy.closedtrades.profit(strategy.closedtrades - 1) : 0.0
+
+if _was_long  and _last_pnl > 0
+    alert("UBF Long TP  | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_long  and _last_pnl < 0
+    alert("UBF Long SL  | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_short and _last_pnl > 0
+    alert("UBF Short TP | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if _was_short and _last_pnl < 0
+    alert("UBF Short SL | " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// ─── NEWS FILTER PLACEHOLDER ─────────────────────────────────────────────────
+// To activate: add  i_block_news = input.bool(false, "Block Trades (News)")
+// Then add `and not i_block_news` to long_sig / short_sig conditions above.
+// Toggle manually before high-impact events: NFP, CPI, FOMC, BOE, ECB, etc.
+// =============================================================================
