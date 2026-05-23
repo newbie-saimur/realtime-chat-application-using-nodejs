@@ -342,8 +342,8 @@ var float wf_M2    = 0.0    // sum of squared deviations from running mean
 var float wf_negss = 0.0    // sum of (negative return)² — for Sortino downside σ
 var int   wf_negn  = 0
 
-eq_ret = strategy.equity > 0 and strategy.equity[1] > 0
-     ? (strategy.equity - strategy.equity[1]) / strategy.equity[1] : 0.0
+eq_ret = strategy.equity > 0 and strategy.equity[1] > 0 ?
+     (strategy.equity - strategy.equity[1]) / strategy.equity[1] : 0.0
 
 if not na(eq_ret)
     wf_n    += 1
@@ -437,9 +437,8 @@ sh_wr      = (sh_wins + sh_loss) > 0 ? sh_wins / (sh_wins + sh_loss) * 100 : 0.0
 
 // CAGR: compound annual growth rate using bar-level compounding
 bpy    = float(f_bpy())  // cast int→float for math.pow / math.sqrt
-cagr   = wf_n > 50 and strategy.initial_capital > 0
-     ? (math.pow(math.max(strategy.equity / strategy.initial_capital, 1e-6), bpy / wf_n) - 1.0) * 100
-     : 0.0
+cagr   = wf_n > 50 and strategy.initial_capital > 0 ?
+     (math.pow(math.max(strategy.equity / strategy.initial_capital, 1e-6), bpy / wf_n) - 1.0) * 100 : 0.0
 
 // Sharpe Ratio: annualized mean / annualized std of bar-level returns
 wf_var = wf_n > 1 ? wf_M2 / (wf_n - 1) : 0.0
@@ -460,11 +459,11 @@ calmar     = max_dd_pct > 0 ? cagr / max_dd_pct : 0.0
 
 risk_mult  = f_risk_mult(consec_loss, consec_win)
 
-trade_gate = daily_dd    < i_max_dd_d
-         and weekly_dd   < i_max_dd_w
-         and cooldown_b  == 0
-         and consec_loss < i_max_consec
-         and trades_tod  < i_max_day_t
+trade_gate = daily_dd    < i_max_dd_d and
+             weekly_dd   < i_max_dd_w and
+             cooldown_b  == 0 and
+             consec_loss < i_max_consec and
+             trades_tod  < i_max_day_t
 
 // =============================================================================
 // ─── MARKET REGIME DETECTION ─────────────────────────────────────────────────
@@ -498,13 +497,13 @@ bo_long    = close > res
 bo_short   = close < sup
 flat       = strategy.position_size == 0
 
-long_sig   = bull and rsi_bull  and bo_long  and vwap_l and vol_ok
-         and htf_l and trend_l and regime_ok and f_in_sess()
-         and act_zone and trade_gate and flat
+long_sig   = bull and rsi_bull  and bo_long  and vwap_l and vol_ok and
+             htf_l and trend_l and regime_ok and f_in_sess() and
+             act_zone and trade_gate and flat
 
-short_sig  = bear and rsi_bear  and bo_short and vwap_s and vol_ok
-         and htf_s and trend_s and regime_ok and f_in_sess()
-         and act_zone and trade_gate and flat
+short_sig  = bear and rsi_bear  and bo_short and vwap_s and vol_ok and
+             htf_s and trend_s and regime_ok and f_in_sess() and
+             act_zone and trade_gate and flat
 
 // =============================================================================
 // ─── TRADE STATE ─────────────────────────────────────────────────────────────
@@ -644,9 +643,9 @@ if not na(ep) and barstate.isconfirmed
 
 q_trades = math.min(25.0, float(total_t) / 4.0)                     // 25 pts at 100+ trades
 q_sharpe = math.min(25.0, math.max(0.0, sharpe * 10.0))             // 25 pts at Sharpe 2.5
-q_pf     = pf > 1.0 and pf <= 4.0
-     ? math.min(25.0, (pf - 1.0) * 12.5)
-     : pf > 4.0 ? math.max(0.0, 25.0 - (pf - 4.0) * 5.0) : 0.0    // penalize PF > 4 (likely overfit)
+q_pf     = pf > 1.0 and pf <= 4.0 ?
+     math.min(25.0, (pf - 1.0) * 12.5) :
+     pf > 4.0 ? math.max(0.0, 25.0 - (pf - 4.0) * 5.0) : 0.0    // penalize PF > 4 (likely overfit)
 q_period = math.min(25.0, float(date_to - date_from) / float(_DAY) / 365.0 * 25.0)
 quality  = q_trades + q_sharpe + q_pf + q_period
 q_label  = quality >= 75 ? "HIGH" : quality >= 50 ? "MEDIUM" : quality >= 25 ? "LOW" : "VERY LOW"
