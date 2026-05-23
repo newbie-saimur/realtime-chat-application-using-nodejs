@@ -165,7 +165,7 @@ i_show_lvls  = input.bool(true, "Show SL / TP Lines",          group=GRP_VIS)
 // ─── DATE RANGE & WALK-FORWARD ZONES ─────────────────────────────────────────
 // =============================================================================
 
-_DAY      = 86_400_000
+_DAY      = 86400000
 date_from = switch i_date_mode
     "Last 6 Months" => timenow - 183  * _DAY
     "Last 1 Year"   => timenow - 365  * _DAY
