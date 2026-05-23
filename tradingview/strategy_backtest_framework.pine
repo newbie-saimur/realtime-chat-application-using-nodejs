@@ -19,7 +19,7 @@
 //   M1 / M5  → 3–5 ticks | M15 / H1 → 2–3 ticks | H4 / D → 1–2 ticks
 //   Additional dynamic slippage is configured in the Execution Engine group.
 // =============================================================================
-//@version=5
+//@version=6
 strategy(
      title                   = "Universal Backtest Framework v3.0",
      shorttitle               = "UBF v3.0",
@@ -33,7 +33,7 @@ strategy(
      commission_value         = 0.05,   // ← change per asset class (see header)
      slippage                 = 1,      // base tick slippage; Execution Engine adds more
      calc_on_every_tick       = false,
-     process_orders_on_close  = false   // fills at next bar open — no repainting
+     fill_orders_on_close     = false   // fills at next bar open — no repainting
  )
 
 // =============================================================================
@@ -171,12 +171,12 @@ date_from = switch i_date_mode
     "Last 1 Year"   => timenow - 365  * _DAY
     "Last 2 Years"  => timenow - 730  * _DAY
     "Last 3 Years"  => timenow - 1095 * _DAY
-    "Custom"        => int(i_cust_start)
+    "Custom"        => i_cust_start
     =>                 timenow - 365  * _DAY
-date_to   = i_date_mode == "Custom" ? int(i_cust_end) : int(timenow)
+date_to   = i_date_mode == "Custom" ? i_cust_end : timenow
 
 // Walk-forward split: IS = [date_from, wf_split], OOS = (wf_split, date_to]
-wf_split  = date_from + int((date_to - date_from) * i_wf_is_pct / 100.0)
+wf_split  = date_from + math.round((date_to - date_from) * i_wf_is_pct / 100.0)
 is_zone   = time >= date_from and time <= wf_split
 oos_zone  = time >  wf_split  and time <= date_to
 in_range  = time >= date_from and time <= date_to
@@ -194,7 +194,7 @@ atr_val      = ta.atr(i_atr_len)
 atr_sma50    = ta.sma(atr_val, 50)   // for spread volatility scaling
 vwap_val     = ta.vwap(hlc3)
 vol_sma      = ta.sma(volume, 20)
-[_, _, adx_val] = ta.dmi(14, 14)
+[_dip, _dim, adx_val] = ta.dmi(14, 14)
 
 // Choppiness Index: < 38.2 = strong trend | > 61.8 = choppy/ranging (0-100 scale)
 // Formula: 100 × log10(sum of 1-bar ATRs / (highest high − lowest low)) / log10(n)
@@ -243,7 +243,7 @@ f_spread() =>
 // Deterministic = same sequence every backtest run → reproducible results
 f_slip() =>
     base = i_slip_pts * syminfo.mintick
-    i_rand_slip ? math.random(bar_index * 13 + 7) * base : base * 0.5
+    i_rand_slip ? math.random(bar_index % 999983) * base : base * 0.5
 
 // SL distance in price units
 f_sl_dist() =>
@@ -284,7 +284,7 @@ f_in_sess() =>
 
 // Bars per year (for annualizing Sharpe / Sortino / Calmar)
 f_bpy() =>
-    timeframe.isintraday ? int(252.0 * 1440 / timeframe.multiplier) :
+    timeframe.isintraday ? math.round(252.0 * 1440 / timeframe.multiplier) :
     timeframe.isdaily    ? 252 :
     timeframe.isweekly   ? 52  : 12
 
@@ -361,9 +361,9 @@ if not na(eq_ret)
 var int   cur_m   = month
 var int   cur_y   = year
 var float m_eq0   = strategy.initial_capital
-var array<float> m_ret = array.new_float(0)
-var array<int>   m_mon = array.new_int(0)
-var array<int>   m_yr  = array.new_int(0)
+var float[] m_ret = array.new<float>(0)
+var int[]   m_mon = array.new<int>(0)
+var int[]   m_yr  = array.new<int>(0)
 
 is_new_month = month != month[1] or year != year[1]
 if is_new_month and bar_index > 0
@@ -436,7 +436,7 @@ lg_wr      = (lg_wins + lg_loss) > 0 ? lg_wins / (lg_wins + lg_loss) * 100 : 0.0
 sh_wr      = (sh_wins + sh_loss) > 0 ? sh_wins / (sh_wins + sh_loss) * 100 : 0.0
 
 // CAGR: compound annual growth rate using bar-level compounding
-bpy    = float(f_bpy())
+bpy    = float(f_bpy())  // cast int→float for math.pow / math.sqrt
 cagr   = wf_n > 50 and strategy.initial_capital > 0
      ? (math.pow(math.max(strategy.equity / strategy.initial_capital, 1e-6), bpy / wf_n) - 1.0) * 100
      : 0.0
@@ -791,16 +791,16 @@ if i_show_month and barstate.islast
     f_tcell(t_month, 0, 0, "MON",   _H, size.tiny)
     f_tcell(t_month, 1, 0, "YEAR",  _H, size.tiny)
     f_tcell(t_month, 2, 0, "RET %", _H, size.tiny)
-    _mnames = array.from("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-    _mc = array.size(m_ret)
-    _si = math.max(0, _mc - 12)    // show last 12 months
+    string[] _mnames = array.from("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    int _mc = array.size(m_ret)
+    int _si = math.max(0, _mc - 12)    // show last 12 months
     for i = _si to _mc - 1
-        _r  = array.get(m_ret, i)
-        _m  = array.get(m_mon, i)
-        _y  = array.get(m_yr,  i)
-        _mn = _m >= 1 and _m <= 12 ? array.get(_mnames, _m) : str.tostring(_m)
-        _row = i - _si + 1
+        float  _r   = array.get(m_ret, i)
+        int    _m   = array.get(m_mon, i)
+        int    _y   = array.get(m_yr,  i)
+        string _mn  = _m >= 1 and _m <= 12 ? array.get(_mnames, _m) : str.tostring(_m)
+        int    _row = i - _si + 1
         f_tcell(t_month, 0, _row, _mn,                                   _LBL, size.tiny)
         f_tcell(t_month, 1, _row, str.tostring(_y),                      _LBL, size.tiny)
         f_tcell(t_month, 2, _row, str.tostring(math.round(_r, 2)) + "%",
